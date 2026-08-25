@@ -5,17 +5,22 @@ import { generateCodeVerifier, generateCodeChallenge } from './pkce';
 export default function App() {
   const [tokens, setTokens] = useState(null);
   const [apiResponse, setApiResponse] = useState(null);
-  const fetchedRef = useRef(false); // <--- Bandera para evitar doble petición
+  const fetchedRef = useRef(false);
 
   useEffect(() => {
+    // Si ya hay tokens en sesión previa, los cargamos
+    const storedAccessToken = sessionStorage.getItem('access_token');
+    if (storedAccessToken) {
+      setTokens({ access_token: storedAccessToken });
+    }
+
     const handleCallback = async () => {
       const urlParams = new URLSearchParams(window.location.search);
       const code = urlParams.get('code');
       const verifier = sessionStorage.getItem('code_verifier');
 
-      // Si ya se procesó o no hay parámetros, abortar
       if (!code || !verifier || fetchedRef.current) return;
-      fetchedRef.current = true; 
+      fetchedRef.current = true;
 
       const payload = new URLSearchParams({
         grant_type: 'authorization_code',
@@ -26,6 +31,7 @@ export default function App() {
       });
 
       try {
+        // Paso 3 del Diagrama: Canje de código por tokens
         const res = await fetch(`${CONFIG.cognitoDomain}/oauth2/token`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -35,7 +41,8 @@ export default function App() {
 
         if (res.ok) {
           setTokens(data);
-          sessionStorage.setItem('id_token', data.id_token);
+          // Guardar access_token para autorizar peticiones a la API
+          sessionStorage.setItem('access_token', data.access_token);
           sessionStorage.removeItem('code_verifier');
           window.history.replaceState({}, document.title, "/");
         } else {
@@ -49,15 +56,16 @@ export default function App() {
     handleCallback();
   }, []);
 
+  // Paso 1 del Diagrama: GET /oauth2/authorize con PKCE
   const login = async () => {
     const verifier = generateCodeVerifier();
     const challenge = await generateCodeChallenge(verifier);
     sessionStorage.setItem('code_verifier', verifier);
 
-    const loginUrl = `${CONFIG.cognitoDomain}/login?` +
+    const loginUrl = `${CONFIG.cognitoDomain}/oauth2/authorize?` +
       `client_id=${CONFIG.clientId}&` +
       `response_type=code&` +
-      `scope=openid+email+profile&` +
+      `scope=${encodeURIComponent('openid email profile aws.cognito.signin.user.admin')}&` +
       `redirect_uri=${encodeURIComponent(CONFIG.redirectUri)}&` +
       `code_challenge=${challenge}&` +
       `code_challenge_method=S256`;
@@ -65,13 +73,24 @@ export default function App() {
     window.location.href = loginUrl;
   };
 
+  // Paso 11 del Diagrama: Cerrar sesión SSO en Cognito
+  const logout = () => {
+    sessionStorage.clear();
+    const logoutUrl = `${CONFIG.cognitoDomain}/logout?` +
+      `client_id=${CONFIG.clientId}&` +
+      `logout_uri=${encodeURIComponent(CONFIG.redirectUri)}`;
+    
+    window.location.href = logoutUrl;
+  };
+
+  // Paso 6 del Diagrama: Petición con Authorization: Bearer <access_token>
   const fetchProtectedApi = async () => {
-    const token = sessionStorage.getItem('id_token');
-    if (!token) return alert("Inicia sesión primero");
+    const accessToken = sessionStorage.getItem('access_token');
+    if (!accessToken) return alert("Inicia sesión primero");
 
     try {
       const res = await fetch(`${CONFIG.apiGatewayUrl}/datos`, {
-        headers: { Authorization: token }
+        headers: { Authorization: `Bearer ${accessToken}` }
       });
       const data = await res.json();
       setApiResponse(data);
@@ -88,11 +107,16 @@ export default function App() {
       ) : (
         <div>
           <p>✅ ¡Autenticado con éxito!</p>
-          <button onClick={fetchProtectedApi}>Consumir API Protegida</button>
+          <button onClick={fetchProtectedApi} style={{ marginRight: '10px' }}>
+            Consumir API Protegida (/datos)
+          </button>
+          <button onClick={logout} style={{ background: '#ff4d4d', color: '#fff', border: 'none', padding: '0.4rem 0.8rem', cursor: 'pointer' }}>
+            Cerrar Sesión
+          </button>
         </div>
       )}
       {apiResponse && (
-        <pre style={{ background: '#f4f4f4', padding: '1rem', marginTop: '1rem' }}>
+        <pre style={{ background: '#f4f4f4', padding: '1rem', marginTop: '1rem', borderRadius: '4px' }}>
           {JSON.stringify(apiResponse, null, 2)}
         </pre>
       )}
